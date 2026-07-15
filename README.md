@@ -41,7 +41,11 @@ Networking is deliberately unavailable. Sandboxed code cannot reach the internet
 | Command timeout | 30 seconds |
 | Maximum command timeout | 120 seconds |
 
-A background reaper destroys expired sessions. `destroy_sandbox` force-removes a container and is idempotent. All sessions are removed from an `atexit` handler and from the server's `finally` block when stdio closes. Cancelling `run_javascript` asynchronously aborts the container without waiting for its session lock. Execution timeout or an unexpected execution/file-transfer failure also removes the affected session. Output limits are counted as bytes inside the container; the process group is killed and the response reports `OUTPUT_LIMIT_EXCEEDED` when a stream crosses its cap.
+A background reaper destroys expired sessions. Each container also carries an expiration label, runs an independent maximum-lifetime watchdog, and uses Docker auto-removal. If Python, the MCP client, or the host process exits without cleanup, the container stops and removes itself when its hard lifetime elapses. At startup, the server discovers and removes stopped or already-expired managed containers; it deliberately leaves unexpired containers running so separate local MCP clients cannot destroy one another's active sessions.
+
+`destroy_sandbox` force-removes a container and is idempotent after confirmed removal. A failed Docker removal marks the session as destroying, keeps it in the registry, and adds it to a retry queue. A later `destroy_sandbox` call or background reaper pass retries the same container; the session is forgotten only after Docker confirms removal or reports it already absent. All sessions are also removed from an `atexit` handler and from the server's `finally` block when stdio closes. Cancelling `run_javascript` asynchronously aborts the container without waiting for its session lock.
+
+Execution timeout or an unexpected execution/file-transfer failure removes the affected session. After JavaScript exits, the runner repeatedly kills and checks new processes over a 450 ms grace period. If it cannot prove the process namespace is clean, it reports `PROCESS_CLEANUP_FAILED` and the host destroys the entire session. Output limits are counted as bytes inside the container; the process group is killed and the response reports `OUTPUT_LIMIT_EXCEEDED` when a stream crosses its cap.
 
 Server operators may lower or raise bounded limits with `CODE_SANDBOX_MAX_LIFETIME`, `CODE_SANDBOX_IDLE_TIMEOUT`, `CODE_SANDBOX_MAX_SESSIONS`, `CODE_SANDBOX_DEFAULT_TIMEOUT`, and `CODE_SANDBOX_MAX_TIMEOUT`. Values are strictly validated at startup. These settings are not MCP inputs.
 
@@ -57,7 +61,7 @@ flowchart LR
     MCP["Code Sandbox MCP<br/>Local Python process"]
     Docker["Docker Desktop"]
     Sandbox["Offline JavaScript sandbox<br/>Short-lived container"]
-    Controls["No network<br/>Read-only root<br/>Non-root UID<br/>Resource limits<br/>No host mounts"]
+    Controls["No network<br/>Read-only root<br/>Non-root UID<br/>Resource limits<br/>Lifetime watchdog<br/>No host mounts"]
 
     Client -->|"MCP over stdio"| MCP
     MCP -->|"Docker SDK"| Docker
@@ -307,9 +311,9 @@ The result contains `exit_code`, UTF-8-decoded `stdout` and `stderr`, timeout an
 
 ### `destroy_sandbox`
 
-Input: `session_id`. The result says whether a live session was destroyed. Calling it again is safe.
+Input: `session_id`. The result says whether a live session was destroyed. Calling it again after confirmed removal is safe. If Docker removal fails, the tool reports `CONTAINER_REMOVAL_FAILED` while retaining the session for explicit and background retries.
 
-Errors use stable codes including `INVALID_SESSION`, `SESSION_EXPIRED`, `INVALID_PATH`, `PATH_TRAVERSAL`, `FILE_TOO_LARGE`, `WORKSPACE_LIMIT_EXCEEDED`, `OUTPUT_LIMIT_EXCEEDED`, `TIMEOUT`, `CONTAINER_START_FAILED`, and `CONTAINER_REMOVAL_FAILED`. Responses never include stack traces, Docker daemon details, host paths, container IDs, or submitted content.
+Errors use stable codes including `INVALID_SESSION`, `SESSION_EXPIRED`, `INVALID_PATH`, `PATH_TRAVERSAL`, `FILE_TOO_LARGE`, `WORKSPACE_LIMIT_EXCEEDED`, `OUTPUT_LIMIT_EXCEEDED`, `TIMEOUT`, `PROCESS_CLEANUP_FAILED`, `CONTAINER_START_FAILED`, and `CONTAINER_REMOVAL_FAILED`. Responses never include stack traces, Docker daemon details, host paths, container IDs, or submitted content.
 
 ## Example Codex workflow
 
@@ -329,6 +333,8 @@ At no point do those files appear in the host repository or user profile. See `e
 Security audit logging is enabled by default. On Windows it is stored under `%LOCALAPPDATA%\code-sandbox-mcp\audit.jsonl`; on Linux it uses `$XDG_STATE_HOME` or `~/.local/state`. Set `CODE_SANDBOX_AUDIT_LOG` to choose another host location or `CODE_SANDBOX_AUDIT_ENABLED=false` to disable it.
 
 Each JSONL record contains a timestamp, tool, SHA-256-derived session hash, result, duration, and relevant counts such as file/byte totals, exit code, timeout, output bytes, and cleanup result. It never logs source, raw session/container IDs, environment values, tokens, or Docker inspection data.
+
+Audit writes are best-effort and non-fatal. Permission errors, disk exhaustion, invalid paths, antivirus locks, or a custom logger failure cannot turn an otherwise successful sandbox operation into an error or hide a newly created session ID.
 
 ## Testing and manual verification
 
@@ -359,6 +365,8 @@ Confirm `NetworkMode` is `none`, `ReadonlyRootfs` is true, `CapDrop` is `ALL`, n
 3. Build the image, run unit and Docker integration tests, generate the SBOM, and run Trivy with high/critical failures enabled.
 4. Retag only after review. Never add an MCP image parameter or automatic pull.
 5. Update exact Python pins, regenerate `pylock.toml`, run `pip-audit`, and review Dependabot output.
+
+Every third-party GitHub Action in `.github/workflows/security.yml` is pinned to a full 40-character commit SHA with its release tag recorded in a comment. Review both the upstream release and resolved commit before changing a pin.
 
 See [MIGRATION.md](MIGRATION.md) for the intentionally breaking changes from the original project.
 

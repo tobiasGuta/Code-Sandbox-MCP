@@ -15,7 +15,7 @@ function pids() {
   try {
     return new Set(fs.readdirSync("/proc").filter((name) => /^\d+$/.test(name)).map(Number));
   } catch {
-    return new Set();
+    return null;
   }
 }
 
@@ -25,14 +25,28 @@ function killProcessGroup(child) {
   try { child.kill("SIGKILL"); } catch {}
 }
 
-function reapNewProcesses(baseline) {
-  for (let pass = 0; pass < 5; pass += 1) {
-    for (const pid of pids()) {
+const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+function unexpectedPids(baseline) {
+  const current = pids();
+  if (current === null) return null;
+  return [...current].filter((pid) => !baseline.has(pid) && pid !== process.pid);
+}
+
+async function reapNewProcesses(baseline) {
+  if (baseline === null) return false;
+  for (let pass = 0; pass < 6; pass += 1) {
+    const unexpected = unexpectedPids(baseline);
+    if (unexpected === null) return false;
+    for (const pid of unexpected) {
       if (!baseline.has(pid) && pid !== process.pid) {
         try { process.kill(pid, "SIGKILL"); } catch {}
       }
     }
+    await sleep(75);
   }
+  const remaining = unexpectedPids(baseline);
+  return remaining !== null && remaining.length === 0;
 }
 
 const request = decodeRequest();
@@ -45,6 +59,7 @@ let stderrTruncated = false;
 let timedOut = false;
 let outputLimited = false;
 let finished = false;
+let responseWritten = false;
 
 function append(current, chunk, limit, markTruncated) {
   const remaining = Math.max(0, limit - current.length);
@@ -74,17 +89,28 @@ child.stderr.on("data", (chunk) => {
   if (stderrTruncated && !finished) { outputLimited = true; killProcessGroup(child); }
 });
 
-child.on("error", () => {
+async function finishWithError() {
+  if (responseWritten) return;
+  responseWritten = true;
   clearTimeout(timer);
   finished = true;
-  reapNewProcesses(baseline);
+  await reapNewProcesses(baseline);
   process.stdout.write(JSON.stringify({ ok: false, error: { code: "INTERNAL_ERROR", message: "execution process could not start" } }));
-});
+}
 
-child.on("close", (code, signal) => {
+async function finishWithResult(code, signal) {
+  if (responseWritten) return;
+  responseWritten = true;
   clearTimeout(timer);
   finished = true;
-  reapNewProcesses(baseline);
+  const processNamespaceClean = await reapNewProcesses(baseline);
+  if (!processNamespaceClean) {
+    process.stdout.write(JSON.stringify({
+      ok: false,
+      error: { code: "PROCESS_CLEANUP_FAILED", message: "sandbox process cleanup could not be verified" },
+    }));
+    return;
+  }
   process.stdout.write(JSON.stringify({
     ok: true,
     exit_code: timedOut ? 124 : (outputLimited ? 137 : (code ?? (signal ? 137 : 1))),
@@ -98,4 +124,7 @@ child.on("close", (code, signal) => {
     stderr_bytes: stderr.length,
     duration_ms: Math.max(0, Math.round(performance.now() - started)),
   }));
-});
+}
+
+child.once("error", () => { void finishWithError(); });
+child.once("close", (code, signal) => { void finishWithResult(code, signal); });

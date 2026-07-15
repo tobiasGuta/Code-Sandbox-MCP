@@ -59,3 +59,24 @@ def test_tool_validation_does_not_echo_sensitive_input(manager):
     assert result["error"]["code"] == "INVALID_REQUEST"
     assert sensitive_value not in serialized
     assert "../secret" not in serialized
+
+
+def test_audit_sink_failure_does_not_hide_successful_create_or_destroy(manager, monkeypatch):
+    def fail_audit(*args, **kwargs):
+        del args, kwargs
+        raise OSError("simulated unavailable audit sink")
+
+    monkeypatch.setattr(manager.audit, "log", fail_audit)
+    created = create_sandbox()
+    assert created["profile"] == "javascript-offline"
+    assert created["session_id"] in manager._sessions
+    assert destroy_sandbox(created["session_id"]) == {"ok": True, "destroyed": True}
+
+
+def test_audit_logger_returns_false_on_filesystem_error(tmp_path):
+    from code_sandbox_mcp.audit import AuditLogger
+
+    blocked_parent = tmp_path / "not-a-directory"
+    blocked_parent.write_text("file", encoding="utf-8")
+    logger = AuditLogger(True, blocked_parent / "audit.jsonl")
+    assert logger.log("create_sandbox", None, "ok", 1) is False

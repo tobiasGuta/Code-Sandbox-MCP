@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import threading
 import time
 from collections.abc import Callable
@@ -35,6 +36,7 @@ mcp = FastMCP(
 
 _manager: SessionManager | None = None
 _manager_lock = threading.Lock()
+_logger = logging.getLogger(__name__)
 
 
 def get_manager() -> SessionManager:
@@ -67,6 +69,22 @@ def _safe_validation_error(error: ValidationError) -> dict[str, object]:
     }
 
 
+def _safe_audit(
+    manager: SessionManager,
+    tool: str,
+    session_id: str | None,
+    result: str,
+    duration_ms: int,
+    **fields: Any,
+) -> None:
+    try:
+        manager.audit.log(tool, session_id, result, duration_ms, **fields)
+    except Exception:
+        # Execution and cleanup results must not be lost because an optional
+        # local audit sink is unavailable or a custom logger misbehaves.
+        _logger.warning("sandbox audit event could not be written")
+
+
 def _call(
     tool: str,
     session_id: str | None,
@@ -89,11 +107,12 @@ def _call(
                 audit_fields.setdefault("cleanup_result", "removed" if result.get("destroyed") else "already_absent")
             if session_id is None and isinstance(result.get("session_id"), str):
                 session_id = result["session_id"]
-        manager.audit.log(tool, session_id, "ok", round((time.monotonic() - started) * 1000), **audit_fields)
+        _safe_audit(manager, tool, session_id, "ok", round((time.monotonic() - started) * 1000), **audit_fields)
         return result
     except SandboxError as error:
         if manager is not None:
-            manager.audit.log(
+            _safe_audit(
+                manager,
                 tool,
                 session_id,
                 error.code.value,
@@ -103,7 +122,8 @@ def _call(
         return error.as_dict()
     except Exception:
         if manager is not None:
-            manager.audit.log(
+            _safe_audit(
+                manager,
                 tool,
                 session_id,
                 ErrorCode.INTERNAL_ERROR.value,
@@ -239,7 +259,8 @@ async def run_javascript(
             await asyncio.shield(asyncio.to_thread(manager.abort, request.session_id))
         except SandboxError:
             cleanup_result = "removal_failed"
-        manager.audit.log(
+        _safe_audit(
+            manager,
             "run_javascript",
             request.session_id,
             "REQUEST_CANCELLED",

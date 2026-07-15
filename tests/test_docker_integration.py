@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 
 import pytest
 from docker.errors import NotFound
@@ -42,6 +43,7 @@ def test_real_container_workflow_and_security_inspection(docker_manager):
     assert host["Memory"] == 512 * 1024 * 1024
     assert host["NanoCpus"] == 1_000_000_000
     assert host["PidsLimit"] == 128
+    assert host["AutoRemove"] is True
     assert host["Binds"] in (None, [])
     assert host["PidMode"] in ("", "private")
     assert host["IpcMode"] in ("", "private")
@@ -52,6 +54,9 @@ def test_real_container_workflow_and_security_inspection(docker_manager):
     assert set(environment) - set(MINIMAL_ENVIRONMENT) <= {"SSL_CERT_FILE"}
     assert not any(key.upper().endswith(("TOKEN", "SECRET", "PASSWORD", "API_KEY")) for key in environment)
     assert attrs["Mounts"] == []
+    assert attrs["Config"]["Cmd"] == ["/opt/sandbox/idle.mjs", "600"]
+    assert attrs["Config"]["Labels"]["io.code-sandbox-mcp.managed"] == "true"
+    assert int(attrs["Config"]["Labels"]["io.code-sandbox-mcp.expires-at"]) > int(time.time())
     container = session.docker.container
     socket_check = container.exec_run([
         "node", "-e", "process.exit(require('fs').existsSync('/var/run/docker.sock') ? 1 : 0)",
@@ -129,6 +134,77 @@ def test_links_invalidate_and_destroy_session(docker_manager, source):
         docker_manager.run_javascript(session_id, "links.js", [], 10)
     assert caught.value.code == ErrorCode.UNSAFE_FILE_TYPE
     assert session_id not in docker_manager._sessions
+
+
+def test_daemonized_child_is_reaped_before_execution_returns(docker_manager):
+    session_id = docker_manager.create()["session_id"]
+    source = """
+const {spawn} = require('child_process');
+const payload = "setTimeout(()=>require('fs').writeFileSync('/workspace/escaped','bad'),300)";
+spawn(process.execPath, ['-e', payload], {detached: true, stdio: 'ignore'}).unref();
+"""
+    docker_manager.write_files(session_id, [{"path": "daemon.js", "content": source}], False)
+    result = docker_manager.run_javascript(session_id, "daemon.js", [], 10)
+    assert result["exit_code"] == 0
+    time.sleep(0.5)
+    listed = docker_manager.list_files(session_id, ".", True, 5)
+    assert "escaped" not in {entry["path"] for entry in listed["files"]}
+
+
+def test_startup_sweep_removes_stopped_managed_container(tmp_path):
+    config = SandboxConfig(audit_enabled=False, audit_path=tmp_path / "audit")
+    backend = DockerBackend(config)
+    orphan = backend.client.containers.create(
+        image=backend.image_id,
+        command=["/opt/sandbox/idle.mjs", "600"],
+        labels={
+            "io.code-sandbox-mcp.managed": "true",
+            "io.code-sandbox-mcp.owner": "orphan-test",
+            "io.code-sandbox-mcp.expires-at": str(int(time.time()) + 600),
+        },
+    )
+    orphan_id = orphan.id
+    assert isinstance(orphan_id, str)
+    manager = SessionManager(config, backend, AuditLogger(False, config.audit_path), start_reaper=False)
+    try:
+        with pytest.raises(NotFound):
+            backend.client.containers.get(orphan_id)
+    finally:
+        manager.close()
+        try:
+            orphan.remove(force=True)
+        except NotFound:
+            pass
+
+
+def test_container_watchdog_stops_and_auto_removes_container(tmp_path):
+    config = SandboxConfig(audit_enabled=False, audit_path=tmp_path / "audit")
+    backend = DockerBackend(config)
+    container = backend.client.containers.create(
+        image=backend.image_id,
+        command=["/opt/sandbox/idle.mjs", "1"],
+        detach=True,
+        auto_remove=True,
+        network_mode="none",
+        read_only=True,
+        user="65532:65532",
+        cap_drop=["ALL"],
+        security_opt=["no-new-privileges:true"],
+        labels={"io.code-sandbox-mcp.managed": "true"},
+    )
+    container_id = container.id
+    assert isinstance(container_id, str)
+    container.start()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            backend.client.containers.get(container_id)
+        except NotFound:
+            break
+        time.sleep(0.1)
+    else:
+        container.remove(force=True)
+        pytest.fail("watchdog container was not auto-removed")
 
 
 @pytest.mark.destructive_docker

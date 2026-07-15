@@ -65,7 +65,7 @@ class DockerBackend:
                 # its built-in seccomp/default LSM policy when available.
                 pass
 
-    def create(self, owner_label: str) -> DockerSession:
+    def create(self, owner_label: str, expires_at_epoch: int) -> DockerSession:
         tmpfs = {
             "/workspace": (
                 f"rw,nosuid,nodev,size={self.config.max_workspace_bytes},"
@@ -77,8 +77,9 @@ class DockerBackend:
         try:
             container = self.client.containers.create(
                 image=self.image_id,
-                command=["/opt/sandbox/idle.mjs"],
+                command=["/opt/sandbox/idle.mjs", str(self.config.max_session_lifetime_seconds)],
                 detach=True,
+                auto_remove=True,
                 tty=False,
                 stdin_open=False,
                 network_mode="none",
@@ -104,6 +105,7 @@ class DockerBackend:
                 labels={
                     "io.code-sandbox-mcp.managed": "true",
                     "io.code-sandbox-mcp.owner": owner_label,
+                    "io.code-sandbox-mcp.expires-at": str(expires_at_epoch),
                 },
             )
             container.start()
@@ -115,6 +117,30 @@ class DockerBackend:
                 except DockerException:
                     pass
             raise SandboxError(ErrorCode.CONTAINER_START_FAILED, "sandbox container could not be started") from exc
+
+    def orphan_candidates(self, now_epoch: int) -> list[DockerSession]:
+        """Return stopped or expired managed containers without touching live peers."""
+        try:
+            containers = self.client.containers.list(
+                all=True,
+                filters={"label": "io.code-sandbox-mcp.managed=true"},
+            )
+        except DockerException as exc:
+            raise SandboxError(ErrorCode.CONTAINER_UNAVAILABLE, "managed containers could not be enumerated") from exc
+
+        candidates: list[DockerSession] = []
+        for container in containers:
+            labels = getattr(container, "labels", None)
+            if not isinstance(labels, dict):
+                labels = ((getattr(container, "attrs", {}) or {}).get("Config") or {}).get("Labels") or {}
+            raw_expiry = labels.get("io.code-sandbox-mcp.expires-at")
+            expired = False
+            if isinstance(raw_expiry, str) and raw_expiry.isascii() and raw_expiry.isdecimal():
+                expired = int(raw_expiry) <= now_epoch
+            status = str(getattr(container, "status", "")).lower()
+            if expired or status not in {"running", "restarting"}:
+                candidates.append(DockerSession(container))
+        return candidates
 
     def destroy(self, session: DockerSession) -> None:
         try:

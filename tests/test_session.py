@@ -4,7 +4,12 @@ import time
 
 import pytest
 
+from code_sandbox_mcp.audit import AuditLogger
+from code_sandbox_mcp.config import SandboxConfig
 from code_sandbox_mcp.errors import ErrorCode, SandboxError
+from code_sandbox_mcp.session import SessionManager
+
+from .fakes import FakeBackend, FakeContainer
 
 
 def create_id(manager):
@@ -85,6 +90,53 @@ def test_abort_removes_in_flight_session_without_waiting_for_normal_destroy(mana
     manager.abort(session_id)
     assert session_id not in manager._sessions
     assert manager.backend.created[0].removed is True
+
+
+def test_failed_removal_keeps_session_retryable(manager):
+    session_id = create_id(manager)
+    container = manager.backend.created[0]
+    container.destroy_failures = 1
+
+    with pytest.raises(SandboxError) as caught:
+        manager.destroy(session_id)
+    assert caught.value.code == ErrorCode.CONTAINER_REMOVAL_FAILED
+    assert manager._sessions[session_id].destroying is True
+    assert session_id in manager._pending_removals
+    assert container.removed is False
+
+    assert manager.destroy(session_id) == {"ok": True, "destroyed": True}
+    assert session_id not in manager._sessions
+    assert session_id not in manager._pending_removals
+    assert container.removed is True
+
+
+def test_reaper_retries_failed_removal(manager):
+    session_id = create_id(manager)
+    container = manager.backend.created[0]
+    container.destroy_failures = 1
+    with pytest.raises(SandboxError):
+        manager.destroy(session_id)
+
+    manager._retry_pending_removals()
+    assert session_id not in manager._sessions
+    assert container.removed is True
+
+
+def test_startup_orphan_failure_is_queued_and_retried(tmp_path):
+    config = SandboxConfig(audit_enabled=False, audit_path=tmp_path / "audit")
+    backend = FakeBackend(config)
+    orphan = FakeContainer(destroy_failures=1)
+    backend.startup_orphans.append(orphan)
+
+    manager = SessionManager(config, backend, AuditLogger(False, config.audit_path), start_reaper=False)
+    try:
+        assert len(manager._pending_removals) == 1
+        assert orphan.removed is False
+        manager._retry_pending_removals()
+        assert manager._pending_removals == {}
+        assert orphan.removed is True
+    finally:
+        manager.close()
 
 
 def test_concurrency_limit(manager):

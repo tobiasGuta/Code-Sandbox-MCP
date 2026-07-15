@@ -19,7 +19,7 @@ ENV HOME=/tmp \
 WORKDIR /workspace
 USER 65532:65532
 LABEL io.code-sandbox-mcp.profile="javascript-offline" \
-      org.opencontainers.image.source="https://github.com/philschmid/code-sandbox-mcp"
+      org.opencontainers.image.source="https://github.com/tobiasGuta/Code-Sandbox-MCP"
 
 ENTRYPOINT ["/usr/local/bin/node"]
 CMD ["/opt/sandbox/idle.mjs"]

@@ -21,9 +21,9 @@ class AuditLogger:
             return None
         return hashlib.sha256(session_id.encode("ascii")).hexdigest()[:16]
 
-    def log(self, tool: str, session_id: str | None, result: str, duration_ms: int, **fields: Any) -> None:
+    def log(self, tool: str, session_id: str | None, result: str, duration_ms: int, **fields: Any) -> bool:
         if not self.enabled:
-            return
+            return True
         allowed_fields = {
             "exit_code", "timed_out", "file_count", "submitted_bytes",
             "stdout_bytes", "stderr_bytes", "cleanup_result",
@@ -37,9 +37,13 @@ class AuditLogger:
         }
         record.update({key: fields[key] for key in allowed_fields if key in fields})
         encoded = json.dumps(record, separators=(",", ":"), ensure_ascii=True) + "\n"
-        with self._lock:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.open("a", encoding="utf-8", newline="\n") as handle:
-                handle.write(encoded)
-            if os.name != "nt":
-                os.chmod(self.path, 0o600)
+        try:
+            with self._lock:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                with self.path.open("a", encoding="utf-8", newline="\n") as handle:
+                    handle.write(encoded)
+                if os.name != "nt":
+                    os.chmod(self.path, 0o600)
+        except OSError:
+            return False
+        return True

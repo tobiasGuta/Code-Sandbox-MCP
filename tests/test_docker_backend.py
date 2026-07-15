@@ -13,6 +13,9 @@ class FakeDockerContainer:
     def __init__(self):
         self.started = False
         self.removed = False
+        self.id = "container-id"
+        self.status = "running"
+        self.labels = {}
 
     def start(self):
         self.started = True
@@ -30,6 +33,10 @@ class FakeContainers:
         self.kwargs = kwargs
         return self.container
 
+    def list(self, **kwargs):
+        assert kwargs == {"all": True, "filters": {"label": "io.code-sandbox-mcp.managed=true"}}
+        return [self.container]
+
 
 def test_container_configuration_is_explicit_and_hardened(tmp_path):
     image = SimpleNamespace(
@@ -41,11 +48,13 @@ def test_container_configuration_is_explicit_and_hardened(tmp_path):
     client = SimpleNamespace(images=images, containers=containers)
     config = SandboxConfig(audit_enabled=False, audit_path=tmp_path / "audit")
     backend = DockerBackend(config, client)
-    backend.create("b" * 32)
+    backend.create("b" * 32, 2_000_000_000)
     values = containers.kwargs
     assert values is not None
 
     assert values["image"] == image.id
+    assert values["command"] == ["/opt/sandbox/idle.mjs", "600"]
+    assert values["auto_remove"] is True
     assert values["network_mode"] == "none"
     assert values["read_only"] is True
     assert values["user"] == "65532:65532"
@@ -63,3 +72,26 @@ def test_container_configuration_is_explicit_and_hardened(tmp_path):
     assert "noexec" in values["tmpfs"]["/tmp"]
     assert values["environment"] == MINIMAL_ENVIRONMENT
     assert not any("DOCKER" in key or "TOKEN" in key or "KEY" in key for key in values["environment"])
+    assert values["labels"] == {
+        "io.code-sandbox-mcp.managed": "true",
+        "io.code-sandbox-mcp.owner": "b" * 32,
+        "io.code-sandbox-mcp.expires-at": "2000000000",
+    }
+
+
+def test_orphan_discovery_selects_only_expired_or_stopped_managed_containers(tmp_path):
+    image = SimpleNamespace(
+        id="sha256:" + "a" * 64,
+        attrs={"Config": {"Labels": {"io.code-sandbox-mcp.profile": "javascript-offline"}}},
+    )
+    images = SimpleNamespace(get=lambda reference: image)
+    containers = FakeContainers()
+    client = SimpleNamespace(images=images, containers=containers)
+    backend = DockerBackend(SandboxConfig(audit_enabled=False, audit_path=tmp_path / "audit"), client)
+
+    containers.container.labels = {"io.code-sandbox-mcp.expires-at": "99"}
+    assert backend.orphan_candidates(100)[0].container is containers.container
+    containers.container.labels = {"io.code-sandbox-mcp.expires-at": "101"}
+    assert backend.orphan_candidates(100) == []
+    containers.container.status = "exited"
+    assert backend.orphan_candidates(100)[0].container is containers.container

@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import base64
 import hashlib
+import logging
 import secrets
 import threading
 import time
@@ -18,6 +19,8 @@ from .config import SandboxConfig
 from .docker_backend import DockerSession
 from .errors import ErrorCode, SandboxError
 
+_logger = logging.getLogger(__name__)
+
 
 @dataclass(slots=True)
 class Session:
@@ -27,7 +30,17 @@ class Session:
     expires_monotonic: float
     expires_at: datetime
     last_used_monotonic: float
+    destroying: bool = False
     lock: threading.RLock = field(default_factory=threading.RLock)
+    removal_lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+@dataclass(slots=True)
+class PendingRemoval:
+    key: str
+    docker: DockerSession
+    session: Session | None
+    lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 class SessionManager:
@@ -43,12 +56,14 @@ class SessionManager:
         self.backend = backend
         self.audit = audit
         self._sessions: dict[str, Session] = {}
+        self._pending_removals: dict[str, PendingRemoval] = {}
         self._registry_lock = threading.RLock()
         self._creating = 0
         self._closed = False
         self._owner = secrets.token_hex(16)
         self._stop = threading.Event()
         self._reaper: threading.Thread | None = None
+        self._queue_startup_orphans()
         if start_reaper:
             self._reaper = threading.Thread(target=self._reaper_loop, name="sandbox-reaper", daemon=True)
             self._reaper.start()
@@ -63,14 +78,14 @@ class SessionManager:
             self._creating += 1
         session_id = secrets.token_urlsafe(32)
         owner_label = hashlib.sha256(f"{self._owner}:{session_id}".encode()).hexdigest()[:32]
-        try:
-            docker_session = self.backend.create(owner_label)
-        finally:
-            with self._registry_lock:
-                self._creating -= 1
         now_mono = time.monotonic()
         now_wall = datetime.now(UTC)
         expires_at = now_wall + timedelta(seconds=self.config.max_session_lifetime_seconds)
+        try:
+            docker_session = self.backend.create(owner_label, int(expires_at.timestamp()))
+        finally:
+            with self._registry_lock:
+                self._creating -= 1
         session = Session(
             session_id=session_id,
             docker=docker_session,
@@ -101,12 +116,13 @@ class SessionManager:
     def lease(self, session_id: str) -> Iterator[Session]:
         with self._registry_lock:
             session = self._sessions.get(session_id)
-        if session is None:
+            destroying = session.destroying if session is not None else False
+        if session is None or destroying:
             raise SandboxError(ErrorCode.INVALID_SESSION, "session is invalid or has been destroyed")
         session.lock.acquire()
         try:
             with self._registry_lock:
-                if self._sessions.get(session_id) is not session:
+                if self._sessions.get(session_id) is not session or session.destroying:
                     raise SandboxError(ErrorCode.INVALID_SESSION, "session is invalid or has been destroyed")
             if self._expired(session):
                 self._destroy_locked(session)
@@ -270,22 +286,86 @@ class SessionManager:
         daemon error and cannot put the session back into the registry.
         """
         with self._registry_lock:
-            session = self._sessions.pop(session_id, None)
+            session = self._sessions.get(session_id)
         if session is not None:
-            self.backend.destroy(session.docker)
+            self._destroy_locked(session)
 
     def _destroy_locked(self, session: Session) -> None:
         with self._registry_lock:
-            self._sessions.pop(session.session_id, None)
-        self.backend.destroy(session.docker)
+            current = self._sessions.get(session.session_id)
+            if current is not session:
+                return
+            session.destroying = True
+            pending = self._pending_removals.get(session.session_id)
+            if pending is None:
+                pending = PendingRemoval(
+                    key=session.session_id,
+                    docker=session.docker,
+                    session=session,
+                    lock=session.removal_lock,
+                )
+                self._pending_removals[session.session_id] = pending
+        self._attempt_pending_removal(pending, blocking=True, raise_on_failure=True)
+
+    def _queue_startup_orphans(self) -> None:
+        try:
+            candidates = self.backend.orphan_candidates(int(time.time()))
+        except (AttributeError, SandboxError):
+            return
+        with self._registry_lock:
+            for docker_session in candidates:
+                identity = str(getattr(docker_session.container, "id", id(docker_session.container)))
+                key = "startup-" + hashlib.sha256(identity.encode()).hexdigest()[:32]
+                self._pending_removals.setdefault(key, PendingRemoval(key, docker_session, None))
+        self._retry_pending_removals()
+
+    def _attempt_pending_removal(
+        self,
+        pending: PendingRemoval,
+        *,
+        blocking: bool,
+        raise_on_failure: bool,
+    ) -> bool:
+        if not pending.lock.acquire(blocking=blocking):
+            return False
+        try:
+            with self._registry_lock:
+                if self._pending_removals.get(pending.key) is not pending:
+                    return True
+            try:
+                self.backend.destroy(pending.docker)
+            except SandboxError:
+                if raise_on_failure:
+                    raise
+                return False
+            with self._registry_lock:
+                if self._pending_removals.get(pending.key) is pending:
+                    self._pending_removals.pop(pending.key, None)
+                if pending.session is not None and self._sessions.get(pending.key) is pending.session:
+                    self._sessions.pop(pending.key, None)
+            return True
+        finally:
+            pending.lock.release()
+
+    def _retry_pending_removals(self) -> None:
+        with self._registry_lock:
+            pending = list(self._pending_removals.values())
+        for removal in pending:
+            try:
+                self._attempt_pending_removal(removal, blocking=False, raise_on_failure=False)
+            except Exception:
+                # Cleanup must never terminate the reaper. The watchdog and a
+                # later retry remain available if a backend violates its API.
+                _logger.error("unexpected sandbox removal retry failure")
 
     def _reaper_loop(self) -> None:
         while not self._stop.wait(self.config.cleanup_interval_seconds):
+            self._retry_pending_removals()
             with self._registry_lock:
                 sessions = list(self._sessions.values())
             now = time.monotonic()
             for session in sessions:
-                if not self._expired(session, now) or not session.lock.acquire(blocking=False):
+                if session.destroying or not self._expired(session, now) or not session.lock.acquire(blocking=False):
                     continue
                 try:
                     if self._expired(session):
@@ -311,3 +391,4 @@ class SessionManager:
                     self._destroy_locked(session)
                 except SandboxError:
                     pass
+        self._retry_pending_removals()

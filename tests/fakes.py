@@ -13,22 +13,32 @@ from code_sandbox_mcp.errors import ErrorCode, SandboxError
 class FakeContainer:
     files: dict[str, bytes] = field(default_factory=dict)
     removed: bool = False
+    destroy_failures: int = 0
+    expires_at_epoch: int | None = None
 
 
 class FakeBackend:
     def __init__(self, config: Any) -> None:
         self.config = config
         self.created: list[FakeContainer] = []
+        self.startup_orphans: list[FakeContainer] = []
         self.last_run: tuple[str, list[str], int] | None = None
 
-    def create(self, owner_label: str) -> DockerSession:
+    def create(self, owner_label: str, expires_at_epoch: int) -> DockerSession:
         assert len(owner_label) == 32
-        container = FakeContainer()
+        container = FakeContainer(expires_at_epoch=expires_at_epoch)
         self.created.append(container)
         return DockerSession(container)
 
     def destroy(self, session: DockerSession) -> None:
+        if session.container.destroy_failures:
+            session.container.destroy_failures -= 1
+            raise SandboxError(ErrorCode.CONTAINER_REMOVAL_FAILED, "simulated removal failure")
         session.container.removed = True
+
+    def orphan_candidates(self, now_epoch: int) -> list[DockerSession]:
+        del now_epoch
+        return [DockerSession(container) for container in self.startup_orphans if not container.removed]
 
     @staticmethod
     def _entries(container: FakeContainer) -> list[dict[str, Any]]:

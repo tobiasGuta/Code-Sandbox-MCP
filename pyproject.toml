@@ -4,7 +4,7 @@ version = "1.0.0"
 description = "Disposable, offline JavaScript workspaces for MCP clients"
 readme = "README.md"
 requires-python = ">=3.10"
-authors = [{ name = "Philipp Schmid", email = "philschmid@google.com" }]
+authors = [{ name = "tobiasGuta" }]
 license = { text = "MIT" }
 dependencies = [
     "docker==7.1.0",
@@ -13,9 +13,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/philschmid/code-sandbox-mcp"
-Repository = "https://github.com/philschmid/code-sandbox-mcp"
-"Bug Tracker" = "https://github.com/philschmid/code-sandbox-mcp/issues"
+Homepage = "https://github.com/tobiasGuta/Code-Sandbox-MCP"
+Repository = "https://github.com/tobiasGuta/Code-Sandbox-MCP"
+"Bug Tracker" = "https://github.com/tobiasGuta/Code-Sandbox-MCP/issues"
 
 [project.optional-dependencies]
 dev = [
