@@ -20,7 +20,7 @@ Repository = "https://github.com/philschmid/code-sandbox-mcp"
 [project.optional-dependencies]
 dev = [
     "hatchling==1.27.0",
-    "pip-audit==2.10.0",
+    "pip-audit==2.10.1",
     "pyright==1.1.407",
     "pytest==9.1.1",
     "ruff==0.15.21",
