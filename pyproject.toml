@@ -19,7 +19,7 @@ Repository = "https://github.com/philschmid/code-sandbox-mcp"
 
 [project.optional-dependencies]
 dev = [
-    "hatchling==1.27.0",
+    "hatchling==1.31.0",
     "pip-audit==2.10.0",
     "pyright==1.1.407",
     "pytest==9.1.1",
@@ -30,7 +30,7 @@ dev = [
 code-sandbox-mcp = "code_sandbox_mcp.server:main"
 
 [build-system]
-requires = ["hatchling==1.27.0"]
+requires = ["hatchling==1.31.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
