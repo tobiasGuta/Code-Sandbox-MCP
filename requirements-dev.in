@@ -3,6 +3,6 @@ hatchling==1.27.0
 mcp==1.28.1
 pip-audit==2.10.0
 pydantic==2.13.4
-pyright==1.1.407
+pyright==1.1.411
 pytest==9.1.1
 ruff==0.15.21

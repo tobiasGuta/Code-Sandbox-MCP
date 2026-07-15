@@ -21,7 +21,7 @@ Repository = "https://github.com/philschmid/code-sandbox-mcp"
 dev = [
     "hatchling==1.27.0",
     "pip-audit==2.10.0",
-    "pyright==1.1.407",
+    "pyright==1.1.411",
     "pytest==9.1.1",
     "ruff==0.15.21",
 ]
