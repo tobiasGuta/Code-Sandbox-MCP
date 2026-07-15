@@ -78,7 +78,9 @@ def _safe_audit(
     **fields: Any,
 ) -> None:
     try:
-        manager.audit.log(tool, session_id, result, duration_ms, **fields)
+        written = manager.audit.log(tool, session_id, result, duration_ms, **fields)
+        if written is False:
+            _logger.warning("sandbox audit event could not be written")
     except Exception:
         # Execution and cleanup results must not be lost because an optional
         # local audit sink is unavailable or a custom logger misbehaves.

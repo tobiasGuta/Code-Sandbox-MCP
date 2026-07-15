@@ -7,13 +7,14 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import docker
 from docker.errors import DockerException, ImageNotFound, NotFound
 from docker.types import Ulimit
 
-from .config import SandboxConfig
+from .config import SANDBOX_RUNTIME_VERSION, SandboxConfig
 from .errors import ErrorCode, SandboxError
 
 MINIMAL_ENVIRONMENT = {
@@ -45,10 +46,13 @@ class DockerBackend:
         except DockerException as exc:
             raise SandboxError(ErrorCode.CONTAINER_UNAVAILABLE, "Docker is unavailable") from exc
         labels = (image.attrs.get("Config") or {}).get("Labels") or {}
-        if labels.get("io.code-sandbox-mcp.profile") != "javascript-offline":
+        if (
+            labels.get("io.code-sandbox-mcp.profile") != "javascript-offline"
+            or labels.get("io.code-sandbox-mcp.runtime-version") != SANDBOX_RUNTIME_VERSION
+        ):
             raise SandboxError(
                 ErrorCode.CONTAINER_UNAVAILABLE,
-                "the installed image does not have the required profile label",
+                "the installed image does not have the required runtime labels",
             )
         # Resolve once to an immutable content ID. A later retag cannot change sessions.
         self.image_id = str(image.id)
@@ -137,10 +141,30 @@ class DockerBackend:
             expired = False
             if isinstance(raw_expiry, str) and raw_expiry.isascii() and raw_expiry.isdecimal():
                 expired = int(raw_expiry) <= now_epoch
+            legacy_expired = False
+            if not isinstance(raw_expiry, str) or not raw_expiry.isascii() or not raw_expiry.isdecimal():
+                created_epoch = self._container_created_epoch(container)
+                if created_epoch is not None:
+                    legacy_expired = created_epoch + self.config.max_session_lifetime_seconds <= now_epoch
             status = str(getattr(container, "status", "")).lower()
-            if expired or status not in {"running", "restarting"}:
+            if expired or legacy_expired or status not in {"running", "restarting"}:
                 candidates.append(DockerSession(container))
         return candidates
+
+    @staticmethod
+    def _container_created_epoch(container: Any) -> int | None:
+        raw_created = (getattr(container, "attrs", {}) or {}).get("Created")
+        if isinstance(raw_created, int | float):
+            return int(raw_created)
+        if not isinstance(raw_created, str) or not raw_created:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw_created.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return int(parsed.timestamp())
 
     def destroy(self, session: DockerSession) -> None:
         try:

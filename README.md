@@ -41,7 +41,7 @@ Networking is deliberately unavailable. Sandboxed code cannot reach the internet
 | Command timeout | 30 seconds |
 | Maximum command timeout | 120 seconds |
 
-A background reaper destroys expired sessions. Each container also carries an expiration label, runs an independent maximum-lifetime watchdog, and uses Docker auto-removal. If Python, the MCP client, or the host process exits without cleanup, the container stops and removes itself when its hard lifetime elapses. At startup, the server discovers and removes stopped or already-expired managed containers; it deliberately leaves unexpired containers running so separate local MCP clients cannot destroy one another's active sessions.
+A background reaper destroys expired sessions. Each container also carries an expiration label, runs an independent maximum-lifetime watchdog, and uses Docker auto-removal. If Python, the MCP client, or the host process exits without cleanup, the container stops and removes itself when its hard lifetime elapses. At startup, the server discovers and removes stopped or already-expired managed containers; it deliberately leaves unexpired containers running so separate local MCP clients cannot destroy one another's active sessions. A legacy managed container with no valid expiration label is removed only when its Docker creation time is older than the configured maximum session lifetime. If Docker does not provide a valid creation time, the server preserves it for manual inspection rather than guessing.
 
 `destroy_sandbox` force-removes a container and is idempotent after confirmed removal. A failed Docker removal marks the session as destroying, keeps it in the registry, and adds it to a retry queue. A later `destroy_sandbox` call or background reaper pass retries the same container; the session is forgotten only after Docker confirms removal or reports it already absent. All sessions are also removed from an `atexit` handler and from the server's `finally` block when stdio closes. Cancelling `run_javascript` asynchronously aborts the container without waiting for its session lock.
 
@@ -114,18 +114,18 @@ Test-Path .\.venv\Scripts\code-sandbox-mcp.exe
 
 ```powershell
 docker build --pull `
-  -t code-sandbox-mcp-javascript:1.0.0 `
+  -t code-sandbox-mcp-javascript:1.0.1 `
   -f containers\Dockerfile.nodejs .
 ```
 
 Verify the exact local image and its security profile label:
 
 ```powershell
-docker image inspect code-sandbox-mcp-javascript:1.0.0 --format 'ID={{.Id}}'
-docker image inspect code-sandbox-mcp-javascript:1.0.0 --format '{{json .Config.Labels}}'
+docker image inspect code-sandbox-mcp-javascript:1.0.1 --format 'ID={{.Id}}'
+docker image inspect code-sandbox-mcp-javascript:1.0.1 --format '{{json .Config.Labels}}'
 ```
 
-The labels JSON must contain `"io.code-sandbox-mcp.profile":"javascript-offline"`. The Dockerfile copies the Node 22.23.0 binary from a digest-pinned official Node build stage into a separately digest-pinned `distroless/cc-debian12:nonroot` runtime. Build tools, npm, Perl, and the source image filesystem do not enter the final image. The MCP server resolves `code-sandbox-mcp-javascript:1.0.0` to its immutable local `sha256:` image ID and checks the profile label before creating a session. It never pulls an image automatically.
+The labels JSON must contain both `"io.code-sandbox-mcp.profile":"javascript-offline"` and `"io.code-sandbox-mcp.runtime-version":"1.0.1"`. The Dockerfile copies the Node 22.23.0 binary from a digest-pinned official Node build stage into a separately digest-pinned `distroless/cc-debian12:nonroot` runtime. Build tools, npm, Perl, and the source image filesystem do not enter the final image. The MCP server resolves `code-sandbox-mcp-javascript:1.0.1` to its immutable local `sha256:` image ID and rejects an image unless both runtime labels exactly match. It never pulls an image automatically.
 
 Launching `code-sandbox-mcp.exe` manually is not normally useful: it is a stdio server and waits for an MCP client on standard input. Register the executable with one of the clients below instead.
 
@@ -135,7 +135,7 @@ Changes to `containers/Dockerfile.nodejs`, `containers/idle.mjs`, `containers/sa
 
 ```powershell
 docker build --pull --no-cache `
-  -t code-sandbox-mcp-javascript:1.0.0 `
+  -t code-sandbox-mcp-javascript:1.0.1 `
   -f containers\Dockerfile.nodejs .
 ```
 
@@ -334,7 +334,7 @@ Security audit logging is enabled by default. On Windows it is stored under `%LO
 
 Each JSONL record contains a timestamp, tool, SHA-256-derived session hash, result, duration, and relevant counts such as file/byte totals, exit code, timeout, output bytes, and cleanup result. It never logs source, raw session/container IDs, environment values, tokens, or Docker inspection data.
 
-Audit writes are best-effort and non-fatal. Permission errors, disk exhaustion, invalid paths, antivirus locks, or a custom logger failure cannot turn an otherwise successful sandbox operation into an error or hide a newly created session ID.
+Audit writes are best-effort and non-fatal. Permission errors, disk exhaustion, invalid paths, antivirus locks, or a custom logger failure cannot turn an otherwise successful sandbox operation into an error or hide a newly created session ID. The server emits a generic warning to stderr when an audit record cannot be written, without exposing the audit path, session ID, or submitted content.
 
 ## Testing and manual verification
 
@@ -344,7 +344,7 @@ Audit writes are best-effort and non-fatal. Permission errors, disk exhaustion, 
 & .\.venv\Scripts\python.exe -m ruff check .
 & .\.venv\Scripts\python.exe -m pyright src tests
 
-docker build --pull -t code-sandbox-mcp-javascript:1.0.0 -f containers\Dockerfile.nodejs .
+docker build --pull -t code-sandbox-mcp-javascript:1.0.1 -f containers\Dockerfile.nodejs .
 $env:RUN_DOCKER_TESTS='1'
 & .\.venv\Scripts\python.exe -m pytest -q tests\test_docker_integration.py
 ```
@@ -374,7 +374,7 @@ See [MIGRATION.md](MIGRATION.md) for the intentionally breaking changes from the
 
 - **`.venv\Scripts\code-sandbox-mcp.exe` is missing**: the project was not installed into that virtual environment. Run `& .\.venv\Scripts\python.exe -m pip install -e .`, then confirm the path with `Test-Path`.
 - **The MCP client reports spawn, ENOENT, or file-not-found**: use the absolute executable path, confirm it with `Test-Path`, and restart the client after changing its configuration.
-- **The MCP server appears but has no usable sandbox**: make sure Docker Desktop is running Linux containers and build `code-sandbox-mcp-javascript:1.0.0` locally. The server deliberately does not pull it.
+- **The MCP server appears but has no usable sandbox**: make sure Docker Desktop is running Linux containers and build `code-sandbox-mcp-javascript:1.0.1` locally. The server deliberately does not pull it or accept an older runtime label.
 - **`CONTAINER_UNAVAILABLE`**: start Docker Desktop in Linux-container mode and build the exact approved image tag locally.
 - **Image profile-label error**: remove the incorrect local tag and rebuild from this Dockerfile.
 - **Immediate session expiry**: check the validated `CODE_SANDBOX_*` server settings; the model cannot override them.

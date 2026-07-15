@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 
 from code_sandbox_mcp.models import FileWrite
 from code_sandbox_mcp.server import (
@@ -71,6 +72,14 @@ def test_audit_sink_failure_does_not_hide_successful_create_or_destroy(manager, 
     assert created["profile"] == "javascript-offline"
     assert created["session_id"] in manager._sessions
     assert destroy_sandbox(created["session_id"]) == {"ok": True, "destroyed": True}
+
+
+def test_audit_false_result_warns_operator_without_failing_operation(manager, monkeypatch, caplog):
+    monkeypatch.setattr(manager.audit, "log", lambda *args, **kwargs: False)
+    with caplog.at_level(logging.WARNING, logger="code_sandbox_mcp.server"):
+        created = create_sandbox()
+    assert created["profile"] == "javascript-offline"
+    assert "sandbox audit event could not be written" in caplog.text
 
 
 def test_audit_logger_returns_false_on_filesystem_error(tmp_path):

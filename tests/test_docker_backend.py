@@ -5,8 +5,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from code_sandbox_mcp.config import SandboxConfig
 from code_sandbox_mcp.docker_backend import MINIMAL_ENVIRONMENT, DockerBackend
+from code_sandbox_mcp.errors import ErrorCode, SandboxError
 
 
 class FakeDockerContainer:
@@ -16,6 +19,7 @@ class FakeDockerContainer:
         self.id = "container-id"
         self.status = "running"
         self.labels = {}
+        self.attrs: dict[str, Any] = {}
 
     def start(self):
         self.started = True
@@ -41,7 +45,10 @@ class FakeContainers:
 def test_container_configuration_is_explicit_and_hardened(tmp_path):
     image = SimpleNamespace(
         id="sha256:" + "a" * 64,
-        attrs={"Config": {"Labels": {"io.code-sandbox-mcp.profile": "javascript-offline"}}},
+        attrs={"Config": {"Labels": {
+            "io.code-sandbox-mcp.profile": "javascript-offline",
+            "io.code-sandbox-mcp.runtime-version": "1.0.1",
+        }}},
     )
     images = SimpleNamespace(get=lambda reference: image)
     containers = FakeContainers()
@@ -82,7 +89,10 @@ def test_container_configuration_is_explicit_and_hardened(tmp_path):
 def test_orphan_discovery_selects_only_expired_or_stopped_managed_containers(tmp_path):
     image = SimpleNamespace(
         id="sha256:" + "a" * 64,
-        attrs={"Config": {"Labels": {"io.code-sandbox-mcp.profile": "javascript-offline"}}},
+        attrs={"Config": {"Labels": {
+            "io.code-sandbox-mcp.profile": "javascript-offline",
+            "io.code-sandbox-mcp.runtime-version": "1.0.1",
+        }}},
     )
     images = SimpleNamespace(get=lambda reference: image)
     containers = FakeContainers()
@@ -95,3 +105,62 @@ def test_orphan_discovery_selects_only_expired_or_stopped_managed_containers(tmp
     assert backend.orphan_candidates(100) == []
     containers.container.status = "exited"
     assert backend.orphan_candidates(100)[0].container is containers.container
+
+
+@pytest.mark.parametrize("labels", [
+    {"io.code-sandbox-mcp.profile": "javascript-offline"},
+    {
+        "io.code-sandbox-mcp.profile": "javascript-offline",
+        "io.code-sandbox-mcp.runtime-version": "1.0.0",
+    },
+    {
+        "io.code-sandbox-mcp.profile": "wrong-profile",
+        "io.code-sandbox-mcp.runtime-version": "1.0.1",
+    },
+])
+def test_stale_or_incorrect_runtime_labels_are_rejected(tmp_path, labels):
+    image = SimpleNamespace(id="sha256:" + "a" * 64, attrs={"Config": {"Labels": labels}})
+    client = SimpleNamespace(images=SimpleNamespace(get=lambda reference: image), containers=FakeContainers())
+    config = SandboxConfig(audit_enabled=False, audit_path=tmp_path / "audit")
+    with pytest.raises(SandboxError) as caught:
+        DockerBackend(config, client)
+    assert caught.value.code == ErrorCode.CONTAINER_UNAVAILABLE
+
+
+def test_old_running_legacy_container_without_expiry_is_cleanup_candidate(tmp_path):
+    image = SimpleNamespace(
+        id="sha256:" + "a" * 64,
+        attrs={"Config": {"Labels": {
+            "io.code-sandbox-mcp.profile": "javascript-offline",
+            "io.code-sandbox-mcp.runtime-version": "1.0.1",
+        }}},
+    )
+    containers = FakeContainers()
+    containers.container.labels = {}
+    containers.container.attrs = {"Created": 100}
+    client = SimpleNamespace(images=SimpleNamespace(get=lambda reference: image), containers=containers)
+    config = SandboxConfig(
+        audit_enabled=False,
+        audit_path=tmp_path / "audit",
+        max_session_lifetime_seconds=600,
+    )
+    backend = DockerBackend(config, client)
+
+    assert backend.orphan_candidates(699) == []
+    assert backend.orphan_candidates(700)[0].container is containers.container
+
+
+def test_running_legacy_container_with_unknown_creation_time_is_preserved(tmp_path):
+    image = SimpleNamespace(
+        id="sha256:" + "a" * 64,
+        attrs={"Config": {"Labels": {
+            "io.code-sandbox-mcp.profile": "javascript-offline",
+            "io.code-sandbox-mcp.runtime-version": "1.0.1",
+        }}},
+    )
+    containers = FakeContainers()
+    containers.container.labels = {"io.code-sandbox-mcp.expires-at": "invalid"}
+    containers.container.attrs = {"Created": "not-a-timestamp"}
+    client = SimpleNamespace(images=SimpleNamespace(get=lambda reference: image), containers=containers)
+    backend = DockerBackend(SandboxConfig(audit_enabled=False, audit_path=tmp_path / "audit"), client)
+    assert backend.orphan_candidates(10_000) == []

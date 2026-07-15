@@ -56,6 +56,7 @@ def test_real_container_workflow_and_security_inspection(docker_manager):
     assert attrs["Mounts"] == []
     assert attrs["Config"]["Cmd"] == ["/opt/sandbox/idle.mjs", "600"]
     assert attrs["Config"]["Labels"]["io.code-sandbox-mcp.managed"] == "true"
+    assert attrs["Config"]["Labels"]["io.code-sandbox-mcp.runtime-version"] == "1.0.1"
     assert int(attrs["Config"]["Labels"]["io.code-sandbox-mcp.expires-at"]) > int(time.time())
     container = session.docker.container
     socket_check = container.exec_run([

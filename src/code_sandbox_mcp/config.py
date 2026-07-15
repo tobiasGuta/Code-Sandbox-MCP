@@ -5,7 +5,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-PINNED_SANDBOX_IMAGE = "code-sandbox-mcp-javascript:1.0.0"
+SANDBOX_RUNTIME_VERSION = "1.0.1"
+PINNED_SANDBOX_IMAGE = f"code-sandbox-mcp-javascript:{SANDBOX_RUNTIME_VERSION}"
 ALLOWED_SANDBOX_IMAGES = frozenset({PINNED_SANDBOX_IMAGE})
 
 
