@@ -51,16 +51,18 @@ Server operators may lower or raise bounded limits with `CODE_SANDBOX_MAX_LIFETI
 
 The MCP server itself runs as a local Python process. It uses the Docker SDK to create and remove a separate locked-down Linux container for each sandbox session:
 
-```text
-Codex / Claude Code / Gemini CLI
-              |
-              | MCP over stdio
-              v
-code-sandbox-mcp.exe on Windows
-              |
-              | Docker Desktop API
-              v
-short-lived offline sandbox container
+```mermaid
+flowchart LR
+    Client["Codex / Claude Code / Gemini CLI"]
+    MCP["Code Sandbox MCP<br/>Local Python process"]
+    Docker["Docker Desktop"]
+    Sandbox["Offline JavaScript sandbox<br/>Short-lived container"]
+    Controls["No network<br/>Read-only root<br/>Non-root UID<br/>Resource limits<br/>No host mounts"]
+
+    Client -->|"MCP over stdio"| MCP
+    MCP -->|"Docker SDK"| Docker
+    Docker -->|"Creates and removes"| Sandbox
+    Sandbox --- Controls
 ```
 
 Do **not** start the sandbox image with `docker run`. The MCP server must create it so all security settings, limits, labels, tmpfs mounts, and cleanup behavior are applied together.
