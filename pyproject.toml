@@ -1,0 +1,54 @@
+[project]
+name = "code-sandbox-mcp"
+version = "1.0.0"
+description = "Disposable, offline JavaScript workspaces for MCP clients"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Philipp Schmid", email = "philschmid@google.com" }]
+license = { text = "MIT" }
+dependencies = [
+    "docker==7.1.0",
+    "mcp==1.28.1",
+    "pydantic==2.13.4",
+]
+
+[project.urls]
+Homepage = "https://github.com/philschmid/code-sandbox-mcp"
+Repository = "https://github.com/philschmid/code-sandbox-mcp"
+"Bug Tracker" = "https://github.com/philschmid/code-sandbox-mcp/issues"
+
+[project.optional-dependencies]
+dev = [
+    "hatchling==1.27.0",
+    "pip-audit==2.10.0",
+    "pyright==1.1.407",
+    "pytest==9.1.1",
+    "ruff==0.15.21",
+]
+
+[project.scripts]
+code-sandbox-mcp = "code_sandbox_mcp.server:main"
+
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/code_sandbox_mcp"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+markers = [
+    "docker: requires a local Docker daemon and the approved image",
+    "destructive_docker: exercises resource exhaustion inside a constrained container",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+ignore = ["S101"]
+exclude = ["examples"]

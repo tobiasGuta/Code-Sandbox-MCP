@@ -1,0 +1,3 @@
+# Security waivers must identify a CVE, owner, justification, and near-term expiry.
+# No high/critical vulnerability is waived in this revision.
+vulnerabilities: []

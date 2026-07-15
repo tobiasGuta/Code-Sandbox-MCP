@@ -1,0 +1,4 @@
+**
+!containers/idle.mjs
+!containers/sandbox-helper.mjs
+!containers/sandbox-runner.mjs
